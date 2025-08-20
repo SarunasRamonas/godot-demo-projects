@@ -8,6 +8,8 @@ const CELL_SIZE = Vector2i(64, 64)
 const BASE_LINE_WIDTH: float = 3.0
 const DRAW_COLOR = Color.WHITE * Color(1, 1, 1, 0.5)
 
+const DEFAULT_COST = 1.0
+
 # The object for pathfinding on 2D grids.
 var _astar := AStarGrid2D.new()
 
@@ -27,18 +29,23 @@ func _ready() -> void:
 	_astar.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_NEVER
 	_astar.update()
 
-	# Iterate over all cells on the tile map layer and mark them as
-	# non-passable.
-	for pos in get_used_cells():
-		_astar.set_point_solid(pos)
-		# To skip cells with certain atlas coordinates you can use:
-		# if get_cell_atlas_coords(pos) == Vector2i(42, 23):
-		#     ...
-		# You can also add a "Custom Data Layer" to the tile set to group
-		# tiles and check it here; in the following example using a string:
-		# if get_cell_tile_data(pos).get_custom_data("type") == "obstacle":
-		#     ...
+	## Iterate over all cells on the tile map layer and mark them as
+	## non-passable.
+	#for pos in get_used_cells():
+		#_astar.set_point_solid(pos)
+		## To skip cells with certain atlas coordinates you can use:
+		## if get_cell_atlas_coords(pos) == Vector2i(42, 23):
+		##     ...
+		## You can also add a "Custom Data Layer" to the tile set to group
+		## tiles and check it here; in the following example using a string:
+		## if get_cell_tile_data(pos).get_custom_data("type") == "obstacle":
+		##     ...
 
+	# Initialize all points to default cost
+	_set_all_points_default_cost()
+	
+	# Apply per-tile weights / solids from TileMap custom data
+	_apply_tile_cost_solids_from_tiles()
 
 func _draw() -> void:
 	if _path.is_empty():
@@ -77,6 +84,10 @@ func find_path(local_start_point: Vector2i, local_end_point: Vector2i) -> Packed
 
 	_start_point = local_to_map(local_start_point)
 	_end_point = local_to_map(local_end_point)
+	
+	# If tiles change at runtime, re-apply costs before each query
+	_apply_tile_cost_solids_from_tiles()
+	
 	_path = _astar.get_point_path(_start_point, _end_point)
 
 	if not _path.is_empty():
@@ -85,5 +96,44 @@ func find_path(local_start_point: Vector2i, local_end_point: Vector2i) -> Packed
 
 	# Redraw the lines and circles from the start to the end point.
 	queue_redraw()
-
+	print("approx cost = ", _approx_path_cost(_path))
 	return _path.duplicate()
+
+func _set_all_points_default_cost() -> void:
+	for y in _astar.region.size.y:
+		for x in _astar.region.size.x:
+			var p: Vector2i = Vector2i(_astar.region.position.x + x, _astar.region.position.y + y)
+			_astar.set_point_solid(p, false)
+			_astar.set_point_weight_scale(p, DEFAULT_COST)
+
+
+func _apply_tile_cost_solids_from_tiles() -> void:
+	# Apply weights from placed tiles.
+	for cell in get_used_cells():
+		var tile_data := get_cell_tile_data(cell)
+		if tile_data == null:
+			continue
+
+		if tile_data.has_custom_data("solid") and bool(tile_data.get_custom_data("solid")):
+			_astar.set_point_solid(cell, true)
+			continue
+
+		# Weighted cost (float). >1.0 = slower, <1.0 = faster.
+		var cost: float = DEFAULT_COST
+		if tile_data.has_custom_data("cost"):
+			cost = float(tile_data.get_custom_data("cost"))
+		
+		# Apply to A*
+		_astar.set_point_solid(cell, false)
+		_astar.set_point_weight_scale(cell, max(cost, 0.0001))
+
+func _approx_path_cost(path: PackedVector2Array) -> float:
+	var total := 0.0
+	for i in range(1, path.size()):
+		var a_cell := local_to_map(path[i-1])
+		var b_cell := local_to_map(path[i])
+		var wa := _astar.get_point_weight_scale(a_cell)
+		var wb := _astar.get_point_weight_scale(b_cell)
+		var d := path[i-1].distance_to(path[i])   # in local units
+		total += d * 0.5 * (wa + wb)              # A* uses distance scaled by weights
+	return total
